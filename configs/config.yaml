@@ -1,0 +1,74 @@
+seed: 42
+
+paths:
+  train_csv: "./data/train.csv"
+  val_csv: "./data/val.csv"
+  test_csv: "./data/test.csv"
+  output_dir: "./outputs"
+  pretrain_ckpt: "./outputs/pretrain_mae.pt"
+  finetune_ckpt: "./outputs/finetune_multitask.pt"
+  submission_path: "./outputs/submission.csv"
+
+data:
+  patch_size: [96, 96, 96]
+  num_workers: 4
+  pin_memory: true
+  hard_negative_ratio: 0.35
+  boundary_margin: 16
+  positive_radius: 6
+  normalization:
+    clip_min: -4.0
+    clip_max: 4.0
+  augment:
+    enabled: true
+    elastic_prob: 0.2
+    flip_prob: 0.5
+    noise_prob: 0.2
+    contrast_prob: 0.2
+
+model:
+  encoder_name: "resnet18"
+  encoder_in_channels: 1
+  encoder_base_channels: 32
+  decoder_channels: [256, 128, 64, 32]
+  regression_hidden_dim: 128
+  mae:
+    mask_ratio: 0.75
+    decoder_channels: 128
+
+training:
+  stage1:
+    epochs: 50
+    batch_size: 2
+    lr: 0.0003
+    weight_decay: 0.01
+  stage2:
+    epochs: 80
+    batch_size: 2
+    lr: 0.0002
+    weight_decay: 0.01
+    loss_weights:
+      w1_seg: 0.7
+      w2_reg: 0.3
+  amp: true
+  grad_clip_norm: 1.0
+  scheduler:
+    t_max: 80
+    eta_min: 1.0e-6
+
+evaluation:
+  voxel_tolerance: 10.0
+  decision_threshold: 0.5
+  tta_rotations: true
+  ensemble_weights:
+    unet3d: 0.5
+    resnet2d: 0.25
+    detr3d: 0.25
+
+tuning:
+  n_trials: 50
+  timeout_sec: null
+  max_epochs_per_trial: 12
+
+inference:
+  batch_size: 1
