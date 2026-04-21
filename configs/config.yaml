@@ -1,6 +1,7 @@
 seed: 42
 
 paths:
+  kaggle_root: "./data/kaggle/raw"
   train_csv: "./data/train.csv"
   val_csv: "./data/val.csv"
   test_csv: "./data/test.csv"
