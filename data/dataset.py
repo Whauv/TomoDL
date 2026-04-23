@@ -109,6 +109,36 @@ class TomogramDataset(Dataset):
     def __len__(self) -> int:
         return len(self.records)
 
+    @staticmethod
+    def _axis_bounds(size: int, patch: int) -> Tuple[int, int]:
+        """Return inclusive valid center bounds for an axis.
+
+        If volume axis is smaller than patch axis, return a single fallback center.
+        """
+        lo = patch // 2
+        hi = size - (patch - patch // 2)
+        if hi < lo:
+            mid = max(0, size // 2)
+            return mid, mid
+        return lo, hi
+
+    def _sample_random_center(self, volume_shape: Sequence[int]) -> Tuple[int, int, int]:
+        center: List[int] = []
+        for s, ps in zip(volume_shape, self.patch_size):
+            lo, hi = self._axis_bounds(int(s), int(ps))
+            if hi <= lo:
+                center.append(int(lo))
+            else:
+                center.append(int(self.rng.integers(lo, hi + 1)))
+        return tuple(center)  # type: ignore[return-value]
+
+    def _clamp_center_to_volume(self, center: Sequence[int], volume_shape: Sequence[int]) -> Tuple[int, int, int]:
+        out: List[int] = []
+        for c, s, ps in zip(center, volume_shape, self.patch_size):
+            lo, hi = self._axis_bounds(int(s), int(ps))
+            out.append(int(np.clip(int(c), lo, hi)))
+        return tuple(out)  # type: ignore[return-value]
+
     def _pick_patch_center(
         self, volume_shape: Sequence[int], motor_records: List[SampleRecord]
     ) -> Tuple[Tuple[int, int, int], int, List[float]]:
@@ -126,17 +156,11 @@ class TomogramDataset(Dataset):
         if motor_records and self.rng.random() < 0.5:
             rec = motor_records[int(self.rng.integers(0, len(motor_records)))]
             center = (int(round(rec.z)), int(round(rec.y)), int(round(rec.x)))
-            center = tuple(
-                int(np.clip(c, ps // 2, s - (ps - ps // 2)))
-                for c, ps, s in zip(center, self.patch_size, volume_shape)
-            )
+            center = self._clamp_center_to_volume(center, volume_shape)
             local = world_to_patch_coords((rec.z, rec.y, rec.x), center, self.patch_size)
             return center, 1, local
 
-        rand_center = tuple(
-            int(self.rng.integers(ps // 2, s - (ps - ps // 2) + 1))
-            for s, ps in zip(volume_shape, self.patch_size)
-        )
+        rand_center = self._sample_random_center(volume_shape)
         for rec in motor_records:
             if is_centroid_inside_patch((rec.z, rec.y, rec.x), rand_center, self.patch_size):
                 local = world_to_patch_coords((rec.z, rec.y, rec.x), rand_center, self.patch_size)

@@ -13,12 +13,29 @@ class PositionalEncoding3D(nn.Module):
 
     def __init__(self, channels: int, max_tokens: int = 8192) -> None:
         super().__init__()
+        self.channels = channels
+        self.max_tokens = max_tokens
         self.embedding = nn.Embedding(max_tokens, channels)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         n = tokens.shape[1]
-        idx = torch.arange(n, device=tokens.device)
-        return tokens + self.embedding(idx)[None, :, :]
+        if n <= self.max_tokens:
+            idx = torch.arange(n, device=tokens.device)
+            pos = self.embedding(idx)[None, :, :]
+            return tokens + pos
+
+        # Fallback for larger token counts: deterministic sinusoidal encoding.
+        device = tokens.device
+        pos_idx = torch.arange(n, device=device, dtype=torch.float32).unsqueeze(1)
+        half_dim = max(1, self.channels // 2)
+        div_term = torch.exp(
+            torch.arange(half_dim, device=device, dtype=torch.float32)
+            * (-torch.log(torch.tensor(10000.0, device=device)) / max(1, half_dim - 1))
+        )
+        pe = torch.zeros((n, self.channels), device=device, dtype=tokens.dtype)
+        pe[:, 0 : 2 * half_dim : 2] = torch.sin(pos_idx * div_term).to(tokens.dtype)
+        pe[:, 1 : 2 * half_dim : 2] = torch.cos(pos_idx * div_term).to(tokens.dtype)
+        return tokens + pe.unsqueeze(0)
 
 
 class DETR3D(nn.Module):
