@@ -73,3 +73,4 @@ tuning:
 
 inference:
   batch_size: 1
+  no_motor_threshold: 0.50

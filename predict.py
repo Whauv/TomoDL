@@ -15,6 +15,7 @@ from inference.pipeline import (
     HeatmapPredictorFactory,
     load_inference_manifest,
     predict_submission_rows,
+    SUBMISSION_COLUMNS,
 )
 
 
@@ -42,6 +43,7 @@ def _validate_predict_config(cfg: dict[str, Any]) -> None:
             "evaluation.ensemble_weights.unet3d",
             "evaluation.ensemble_weights.resnet2d",
             "evaluation.ensemble_weights.detr3d",
+            "inference.no_motor_threshold",
             "model",
         ],
     )
@@ -53,7 +55,7 @@ def run_inference(cfg: dict[str, Any], ckpt_path: str) -> pd.DataFrame:
     test_df = load_inference_manifest(str(cfg["paths"]["test_csv"]))
     predictor = HeatmapPredictorFactory(cfg=cfg, ckpt_path=ckpt_path, device=device)
     rows = predict_submission_rows(test_df=test_df, cfg=cfg, predictor=predictor, device=device)
-    return pd.DataFrame(rows, columns=["tomo_id", "x", "y", "z"])
+    return pd.DataFrame(rows, columns=SUBMISSION_COLUMNS)
 
 
 @cli_entrypoint
