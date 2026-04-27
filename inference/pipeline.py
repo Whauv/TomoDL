@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Tuple
 
 import mrcfile
 import numpy as np
@@ -18,6 +18,7 @@ from models.multitask_model import build_multitask_model
 from models.resnet2d import ResNet2DSliceModel
 
 EPSILON = 1e-8
+SUBMISSION_COLUMNS = ["tomo_id", "Motor axis 0", "Motor axis 1", "Motor axis 2"]
 
 
 def load_tomogram(path: str, norm_cfg: Dict[str, Any]) -> np.ndarray:
@@ -121,19 +122,38 @@ def predict_submission_rows(
 ) -> list[dict[str, float | str]]:
     """Predict rows for submission from a validated test manifest."""
     patch_size = tuple(cfg["data"]["patch_size"])
+    no_motor_threshold = float(
+        cfg.get("inference", {}).get(
+            "no_motor_threshold",
+            cfg.get("evaluation", {}).get("decision_threshold", 0.5),
+        )
+    )
     rows: list[dict[str, float | str]] = []
     for row in test_df.itertuples(index=False):
         volume = load_tomogram(str(row.tomo_path), cfg["data"]["normalization"])
         volume = center_crop_or_pad_3d(volume, patch_size)
         x = torch.from_numpy(volume[None, None, ...]).float().to(device)
         heat = predictor.predict_heatmap(x)
-        centroid = extract_centroid_from_heatmap(heat)[0].cpu().numpy()
-        rows.append(
-            {
-                "tomo_id": str(row.tomo_id),
-                "x": float(centroid[2]),
-                "y": float(centroid[1]),
-                "z": float(centroid[0]),
-            }
-        )
+        peak_score = float(heat.max().item())
+
+        if peak_score < no_motor_threshold:
+            rows.append(
+                {
+                    "tomo_id": str(row.tomo_id),
+                    "Motor axis 0": -1.0,
+                    "Motor axis 1": -1.0,
+                    "Motor axis 2": -1.0,
+                }
+            )
+        else:
+            centroid = extract_centroid_from_heatmap(heat)[0].cpu().numpy()
+            rows.append(
+                {
+                    "tomo_id": str(row.tomo_id),
+                    # Competition expects axes in tomogram order.
+                    "Motor axis 0": float(centroid[0]),
+                    "Motor axis 1": float(centroid[1]),
+                    "Motor axis 2": float(centroid[2]),
+                }
+            )
     return rows
