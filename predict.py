@@ -12,6 +12,7 @@ from core.config import load_yaml_config, require_nested_keys
 from core.errors import cli_entrypoint
 from core.runtime import ensure_output_dir, resolve_device
 from evaluation.submission_validator import validate_submission_df
+from utils.experiment_tracker import ExperimentTracker
 from inference.pipeline import (
     HeatmapPredictorFactory,
     SUBMISSION_COLUMNS,
@@ -52,9 +53,25 @@ def _validate_predict_config(cfg: dict[str, Any]) -> None:
             "inference.instance_threshold",
             "inference.instance_min_size",
             "inference.instance_nms_distance",
+            "inference.use_hybrid_detector",
+            "inference.uncertainty.method",
+            "inference.uncertainty.mc_passes",
+            "inference.uncertainty.threshold",
             "model",
         ],
     )
+
+
+def _build_predict_tracker(cfg: dict[str, Any]) -> ExperimentTracker | None:
+    tr_cfg = cfg.get("tracking", {})
+    if not bool(tr_cfg.get("enabled", False)):
+        return None
+    tracker = ExperimentTracker(
+        root_dir=str(tr_cfg.get("root_dir", "./outputs_laptop/experiments")),
+        experiment_name=str(tr_cfg.get("experiment_name", "tomodl_predict")),
+    )
+    tracker.log_config(cfg)
+    return tracker
 
 
 def run_inference(cfg: dict[str, Any], ckpt_path: str) -> pd.DataFrame:
@@ -73,12 +90,16 @@ def main() -> None:
     _validate_predict_config(cfg)
 
     checkpoint_path = _resolve_checkpoint(args, cfg)
+    tracker = _build_predict_tracker(cfg)
     submission = run_inference(cfg, checkpoint_path)
     expected_ids = load_inference_manifest(str(cfg["paths"]["test_csv"]))["tomo_id"].astype(str).tolist()
     validate_submission_df(submission, expected_tomo_ids=expected_ids)
     out_path = Path(cfg["paths"]["submission_path"])
     ensure_output_dir(str(out_path.parent))
     submission.to_csv(out_path, index=False)
+    if tracker is not None:
+        tracker.log_artifact(str(out_path))
+        tracker.log_metric(step=0, name="prediction_rows", value=float(len(submission)))
     print(f"Saved submission to {out_path}")
 
 

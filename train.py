@@ -16,6 +16,7 @@ from training.finetune import run_finetuning
 from training.pretrain import run_pretraining
 from tuning.optuna_search import run_optuna_search
 from utils.cleanlab_filter import run_cleanlab_on_manifest
+from utils.experiment_tracker import ExperimentTracker
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -46,6 +47,20 @@ def _validate_train_config(cfg: dict[str, Any]) -> None:
     )
 
 
+
+
+
+
+def _build_optional_tracker(cfg: dict[str, Any]) -> ExperimentTracker | None:
+    tr_cfg = cfg.get("tracking", {})
+    if not bool(tr_cfg.get("enabled", False)):
+        return None
+    tracker = ExperimentTracker(
+        root_dir=str(tr_cfg.get("root_dir", "./outputs_laptop/experiments")),
+        experiment_name=str(tr_cfg.get("experiment_name", "tomodl")),
+    )
+    tracker.log_config(cfg)
+    return tracker
 
 
 def _run_optional_cleanlab(enable_cleanlab: bool, cleanlab_mode: str, cfg: dict[str, Any]) -> dict[str, Any]:
@@ -108,9 +123,17 @@ def main() -> None:
     ensure_output_dir(str(cfg["paths"]["output_dir"]))
 
     cfg = _run_optional_cleanlab(args.cleanlab, args.cleanlab_mode, cfg)
+    tracker = _build_optional_tracker(cfg)
+
     pretrained_ckpt = _run_optional_pretraining(args.stage, cfg, device)
+    if tracker is not None and pretrained_ckpt:
+        tracker.log_artifact(pretrained_ckpt)
     _run_optional_optuna(args.optuna, cfg, device, pretrained_ckpt)
     _run_optional_finetuning(args.stage, cfg, device, pretrained_ckpt)
+    if tracker is not None:
+        if Path(cfg["paths"]["finetune_ckpt"]).exists():
+            tracker.log_artifact(str(cfg["paths"]["finetune_ckpt"]))
+        tracker.log_metric(step=0, name="stage_complete", value=1.0)
     _run_optional_ablation(args.ablation, cfg, device)
 
 
