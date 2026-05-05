@@ -43,6 +43,11 @@ model:
   ssl:
     temperature: 0.2
     projection_dim: 128
+  hybrid:
+    query_hidden_dim: 128
+    query_layers: 4
+    num_queries: 32
+    fusion_alpha: 0.7
 
 training:
   stage1:
@@ -101,3 +106,13 @@ inference:
   instance_threshold: 0.5
   instance_min_size: 8
   instance_nms_distance: 6
+  use_hybrid_detector: false
+  uncertainty:
+    method: "none"
+    mc_passes: 4
+    threshold: 0.2
+
+tracking:
+  enabled: false
+  root_dir: "./outputs_laptop/experiments"
+  experiment_name: "tomodl_v4"
