@@ -1,4 +1,4 @@
-"""3D Masked Autoencoder for self-supervised tomogram pretraining."""
+"""3D self-supervised models: MAE and contrastive pretraining."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ class MaskedAutoencoder3D(nn.Module):
     def _mask_latent(self, latent: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, c, d, h, w = latent.shape
         token_count = d * h * w
-        keep_count = int(token_count * (1.0 - self.mask_ratio))
+        keep_count = max(1, int(token_count * (1.0 - self.mask_ratio)))
         noise = torch.rand((b, token_count), device=latent.device)
         ids_shuffle = torch.argsort(noise, dim=1)
         ids_keep = ids_shuffle[:, :keep_count]
@@ -73,3 +73,44 @@ class MaskedAutoencoder3D(nn.Module):
         masked_voxels = voxel_mask > 0.5
         loss = F.mse_loss(recon[masked_voxels], x[masked_voxels]) if masked_voxels.any() else F.mse_loss(recon, x)
         return {"loss": loss, "reconstruction": recon, "mask": voxel_mask}
+
+
+class ContrastivePretrainer3D(nn.Module):
+    """SimCLR-style 3D contrastive pretrainer over shared ResNet3D encoder."""
+
+    def __init__(self, model_cfg: Dict) -> None:
+        super().__init__()
+        ssl_cfg = model_cfg.get("ssl", {})
+        self.temperature = float(ssl_cfg.get("temperature", 0.2))
+        proj_dim = int(ssl_cfg.get("projection_dim", 128))
+        self.encoder: ResNet3DEncoder = build_resnet3d_encoder(model_cfg)
+        feat_dim = int(self.encoder.out_channels[-1])
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.GELU(),
+            nn.Linear(feat_dim, proj_dim),
+        )
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.encoder(x)
+        pooled = F.adaptive_avg_pool3d(feat, output_size=1).flatten(1)
+        z = self.projector(pooled)
+        return F.normalize(z, dim=1)
+
+    def nt_xent(self, z1: torch.Tensor, z2: torch.Tensor) -> torch.Tensor:
+        b = z1.shape[0]
+        z = torch.cat([z1, z2], dim=0)
+        sim = torch.matmul(z, z.T) / max(self.temperature, 1e-6)
+        eye = torch.eye(2 * b, device=sim.device, dtype=torch.bool)
+        sim = sim.masked_fill(eye, -1e9)
+
+        target = torch.arange(2 * b, device=sim.device)
+        target = (target + b) % (2 * b)
+        loss = F.cross_entropy(sim, target)
+        return loss
+
+    def forward(self, view1: torch.Tensor, view2: torch.Tensor) -> Dict[str, torch.Tensor]:
+        z1 = self.encode(view1)
+        z2 = self.encode(view2)
+        loss = self.nt_xent(z1, z2)
+        return {"loss": loss, "z1": z1, "z2": z2}

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Sequence, Tuple
 
 import mrcfile
 import numpy as np
@@ -12,7 +12,7 @@ import torch
 
 from core.errors import DataValidationError, InferenceError
 from data.preprocessing import NormalizationConfig, normalize_voxels
-from evaluation.tta import extract_centroid_from_heatmap, tta_predict_heatmap
+from evaluation.tta import extract_centroid_from_heatmap, extract_instances_from_heatmap, tta_predict_heatmap
 from models.detr3d import DETR3D
 from models.multitask_model import build_multitask_model
 from models.resnet2d import ResNet2DSliceModel
@@ -54,6 +54,26 @@ def center_crop_or_pad_3d(volume: np.ndarray, target_shape: Tuple[int, int, int]
     return out
 
 
+def _window_starts(size: int, patch: int, stride: int) -> list[int]:
+    if size <= patch:
+        return [0]
+    starts = list(range(0, max(1, size - patch + 1), max(1, stride)))
+    if starts[-1] != size - patch:
+        starts.append(size - patch)
+    return starts
+
+
+def _extract_window_with_pad(volume: np.ndarray, start: tuple[int, int, int], patch_size: tuple[int, int, int]) -> np.ndarray:
+    z0, y0, x0 = start
+    pz, py, px = patch_size
+    z1, y1, x1 = z0 + pz, y0 + py, x0 + px
+    crop = volume[z0:min(z1, volume.shape[0]), y0:min(y1, volume.shape[1]), x0:min(x1, volume.shape[2])]
+    if crop.shape != patch_size:
+        pad = [(0, pz - crop.shape[0]), (0, py - crop.shape[1]), (0, px - crop.shape[2])]
+        crop = np.pad(crop, pad, mode="reflect")
+    return crop
+
+
 class HeatmapPredictorFactory:
     """Factory for optional ensemble predictor components."""
 
@@ -61,6 +81,7 @@ class HeatmapPredictorFactory:
         self.cfg = cfg
         self.device = device
         self.ensemble_weights = cfg["evaluation"]["ensemble_weights"]
+        self.inference_cfg = cfg.get("inference", {})
         patch_size = tuple(cfg["data"]["patch_size"])
 
         self.model3d = build_multitask_model(cfg["model"], patch_size=patch_size).to(device)
@@ -87,7 +108,8 @@ class HeatmapPredictorFactory:
 
         with torch.no_grad():
             if bool(self.cfg["evaluation"]["tta_rotations"]):
-                heat3d = tta_predict_heatmap(self.model3d, x)
+                policy = str(self.cfg.get("evaluation", {}).get("tta_policy", "full"))
+                heat3d = tta_predict_heatmap(self.model3d, x, policy=policy)
             else:
                 heat3d = torch.sigmoid(self.model3d(x)["segmentation"])
 
@@ -114,6 +136,65 @@ def load_inference_manifest(csv_path: str) -> pd.DataFrame:
     return df
 
 
+def _predict_peak_and_coord(
+    volume: np.ndarray,
+    patch_size: tuple[int, int, int],
+    predictor: HeatmapPredictorFactory,
+    device: torch.device,
+    sliding_window: bool,
+    window_overlap: float,
+    low_memory_mode: bool,
+) -> tuple[float, tuple[float, float, float]]:
+    if not sliding_window:
+        centered = center_crop_or_pad_3d(volume, patch_size)
+        x = torch.from_numpy(centered[None, None, ...]).float().to(device)
+        heat = predictor.predict_heatmap(x)
+        peak_score = float(heat.max().item())
+        instances = extract_instances_from_heatmap(heat, threshold=float(self.cfg.get("inference", {}).get("instance_threshold", 0.5)), min_size=int(self.cfg.get("inference", {}).get("instance_min_size", 8)), nms_distance=int(self.cfg.get("inference", {}).get("instance_nms_distance", 6)))
+        if instances:
+            centroid = instances[0]["centroid"]
+        else:
+            centroid = extract_centroid_from_heatmap(heat)[0].cpu().numpy().tolist()
+        if low_memory_mode and device.type == "cuda":
+            del x, heat
+            torch.cuda.empty_cache()
+        return peak_score, (float(centroid[0]), float(centroid[1]), float(centroid[2]))
+
+    pz, py, px = patch_size
+    stride = (
+        max(1, int(round(pz * (1.0 - window_overlap)))),
+        max(1, int(round(py * (1.0 - window_overlap)))),
+        max(1, int(round(px * (1.0 - window_overlap)))),
+    )
+    z_starts = _window_starts(volume.shape[0], pz, stride[0])
+    y_starts = _window_starts(volume.shape[1], py, stride[1])
+    x_starts = _window_starts(volume.shape[2], px, stride[2])
+
+    best_score = -1.0
+    best_coord = (0.0, 0.0, 0.0)
+
+    for zs in z_starts:
+        for ys in y_starts:
+            for xs in x_starts:
+                patch = _extract_window_with_pad(volume, (zs, ys, xs), patch_size)
+                x = torch.from_numpy(patch[None, None, ...]).float().to(device)
+                heat = predictor.predict_heatmap(x)
+                flat = heat.flatten(1)
+                idx = int(flat.argmax(dim=1).item())
+                score = float(flat.max().item())
+                if score > best_score:
+                    ly = (idx % (py * px)) // px
+                    lx = idx % px
+                    lz = idx // (py * px)
+                    best_score = score
+                    best_coord = (float(zs + lz), float(ys + ly), float(xs + lx))
+                if low_memory_mode and device.type == "cuda":
+                    del x, heat
+                    torch.cuda.empty_cache()
+
+    return best_score, best_coord
+
+
 def predict_submission_rows(
     test_df: pd.DataFrame,
     cfg: Dict[str, Any],
@@ -122,35 +203,32 @@ def predict_submission_rows(
 ) -> list[dict[str, float | str]]:
     """Predict rows for submission from a validated test manifest."""
     patch_size = tuple(cfg["data"]["patch_size"])
-    no_motor_threshold = float(
-        cfg.get("inference", {}).get(
-            "no_motor_threshold",
-            cfg.get("evaluation", {}).get("decision_threshold", 0.5),
-        )
-    )
+    inf_cfg = cfg.get("inference", {})
+    no_motor_threshold = float(inf_cfg.get("no_motor_threshold", cfg.get("evaluation", {}).get("decision_threshold", 0.5)))
+    low_memory_mode = bool(inf_cfg.get("low_memory_mode", False))
+    sliding_window = bool(inf_cfg.get("sliding_window_if_large", False))
+    window_overlap = float(inf_cfg.get("window_overlap", 0.25))
+
     rows: list[dict[str, float | str]] = []
     for row in test_df.itertuples(index=False):
         volume = load_tomogram(str(row.tomo_path), cfg["data"]["normalization"])
-        volume = center_crop_or_pad_3d(volume, patch_size)
-        x = torch.from_numpy(volume[None, None, ...]).float().to(device)
-        heat = predictor.predict_heatmap(x)
-        peak_score = float(heat.max().item())
+        run_sliding = sliding_window and any(vs > ps for vs, ps in zip(volume.shape, patch_size))
+        peak_score, centroid = _predict_peak_and_coord(
+            volume=volume,
+            patch_size=patch_size,
+            predictor=predictor,
+            device=device,
+            sliding_window=run_sliding,
+            window_overlap=window_overlap,
+            low_memory_mode=low_memory_mode,
+        )
 
         if peak_score < no_motor_threshold:
-            rows.append(
-                {
-                    "tomo_id": str(row.tomo_id),
-                    "Motor axis 0": -1.0,
-                    "Motor axis 1": -1.0,
-                    "Motor axis 2": -1.0,
-                }
-            )
+            rows.append({"tomo_id": str(row.tomo_id), "Motor axis 0": -1.0, "Motor axis 1": -1.0, "Motor axis 2": -1.0})
         else:
-            centroid = extract_centroid_from_heatmap(heat)[0].cpu().numpy()
             rows.append(
                 {
                     "tomo_id": str(row.tomo_id),
-                    # Competition expects axes in tomogram order.
                     "Motor axis 0": float(centroid[0]),
                     "Motor axis 1": float(centroid[1]),
                     "Motor axis 2": float(centroid[2]),

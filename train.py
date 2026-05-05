@@ -15,6 +15,7 @@ from core.runtime import ensure_output_dir, resolve_device, set_reproducible_see
 from training.finetune import run_finetuning
 from training.pretrain import run_pretraining
 from tuning.optuna_search import run_optuna_search
+from utils.cleanlab_filter import run_cleanlab_on_manifest
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,6 +24,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", type=str, choices=["pretrain", "finetune", "both"], default="both")
     parser.add_argument("--optuna", action="store_true", help="Run Optuna hyperparameter search.")
     parser.add_argument("--ablation", action="store_true", help="Run ablation study.")
+    parser.add_argument("--cleanlab", action="store_true", help="Run cleanlab label filtering before finetuning.")
+    parser.add_argument("--cleanlab-mode", type=str, choices=["remove", "relabel"], default="remove")
     return parser
 
 
@@ -41,6 +44,27 @@ def _validate_train_config(cfg: dict[str, Any]) -> None:
             "evaluation",
         ],
     )
+
+
+
+
+def _run_optional_cleanlab(enable_cleanlab: bool, cleanlab_mode: str, cfg: dict[str, Any]) -> dict[str, Any]:
+    if not enable_cleanlab:
+        return cfg
+    out_dir = Path(cfg["paths"]["output_dir"]) / "cleanlab"
+    review_path, cleaned_path = run_cleanlab_on_manifest(
+        train_csv_path=str(cfg["paths"]["train_csv"]),
+        output_dir=str(out_dir),
+        mode=cleanlab_mode,
+        issue_fraction=float(cfg.get("training", {}).get("cleanlab", {}).get("issue_fraction", 0.05)),
+    )
+    print(f"Cleanlab review file: {review_path}")
+    print(f"Cleaned train manifest: {cleaned_path}")
+    cfg2 = dict(cfg)
+    paths = dict(cfg2["paths"])
+    paths["train_csv"] = cleaned_path
+    cfg2["paths"] = paths
+    return cfg2
 
 
 def _run_optional_pretraining(stage: str, cfg: dict[str, Any], device: torch.device) -> str | None:
@@ -83,6 +107,7 @@ def main() -> None:
     device = resolve_device()
     ensure_output_dir(str(cfg["paths"]["output_dir"]))
 
+    cfg = _run_optional_cleanlab(args.cleanlab, args.cleanlab_mode, cfg)
     pretrained_ckpt = _run_optional_pretraining(args.stage, cfg, device)
     _run_optional_optuna(args.optuna, cfg, device, pretrained_ckpt)
     _run_optional_finetuning(args.stage, cfg, device, pretrained_ckpt)
