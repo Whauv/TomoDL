@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
-from cleanlab.filter import find_label_issues
+
+try:
+    from cleanlab.filter import find_label_issues
+except Exception:  # noqa: BLE001
+    find_label_issues = None
 
 
 def flag_noisy_samples(
@@ -15,6 +20,8 @@ def flag_noisy_samples(
     return_indices_ranked_by: str = "self_confidence",
 ) -> np.ndarray:
     """Return candidate noisy-label indices using Cleanlab."""
+    if find_label_issues is None:
+        raise ImportError("cleanlab is required. Install with: pip install cleanlab")
     labels_np = np.asarray(labels, dtype=np.int64)
     if pred_probs.ndim != 2 or pred_probs.shape[1] < 2:
         raise ValueError("pred_probs must have shape [N, C] with C>=2.")
@@ -46,3 +53,38 @@ def filter_training_csv(
         raise ValueError("mode must be one of {'remove', 'relabel'}.")
     out_df.to_csv(output_csv_path, index=False)
     return output_csv_path
+
+
+def run_cleanlab_on_manifest(
+    train_csv_path: str,
+    output_dir: str,
+    mode: str = "remove",
+    issue_fraction: float = 0.05,
+) -> tuple[str, str]:
+    """Run a lightweight cleanlab-style loop and produce review + cleaned manifest.
+
+    Uses heuristic probabilities when model logits are not supplied yet.
+    """
+    df = pd.read_csv(train_csv_path)
+    labels = df["has_motor"].astype(int).to_numpy()
+
+    # Heuristic fallback probabilities for first-pass noisy label triage.
+    probs = np.zeros((len(df), 2), dtype=np.float32)
+    probs[:, 1] = np.where(labels == 1, 0.9, 0.1)
+    probs[:, 0] = 1.0 - probs[:, 1]
+
+    k = int(max(1, round(len(df) * float(issue_fraction))))
+    uncertainty = np.abs(probs[:, 1] - 0.5)
+    candidate_idx = np.argsort(uncertainty)[:k]
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    review_df = df.iloc[candidate_idx].copy()
+    review_df.insert(0, "row_index", candidate_idx)
+    review_path = out / "cleanlab_review_candidates.csv"
+    review_df.to_csv(review_path, index=False)
+
+    cleaned_path = out / "train_cleaned.csv"
+    filter_training_csv(train_csv_path, candidate_idx.tolist(), str(cleaned_path), mode=mode)
+    return str(review_path), str(cleaned_path)

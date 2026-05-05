@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import Dataset
 
 from data.augmentations import build_augmentations
+from data.manifest_checks import validate_manifest
 from data.preprocessing import (
     NormalizationConfig,
     build_spherical_target,
@@ -60,7 +61,12 @@ class TomogramDataset(Dataset):
         normalization_cfg: Optional[Dict[str, Any]] = None,
         is_train: bool = True,
         seed: int = 42,
+        cache_mode: str = "memory",
+        max_cache_items: int = 24,
+        validate_manifest_on_load: bool = True,
     ) -> None:
+        if validate_manifest_on_load:
+            validate_manifest(csv_path, project_root=".", is_test=False)
         self.records = self._read_records(csv_path)
         self.patch_size = tuple(int(v) for v in patch_size)
         self.hard_negative_ratio = float(hard_negative_ratio)
@@ -69,9 +75,12 @@ class TomogramDataset(Dataset):
         self.is_train = is_train
         self.rng = np.random.default_rng(seed)
         self.norm_cfg = NormalizationConfig(**(normalization_cfg or {}))
+        self.cache_mode = str(cache_mode).lower()
+        self.max_cache_items = int(max(0, max_cache_items))
         self.transforms = build_augmentations(augment_cfg or {}) if (is_train and augment_cfg and augment_cfg.get("enabled", True)) else None
 
         self.volume_cache: Dict[str, np.ndarray] = {}
+        self.cache_order: List[str] = []
         self.grouped = self._group_by_tomo(self.records)
         self.tomo_ids = list(self.grouped.keys())
 
@@ -102,8 +111,15 @@ class TomogramDataset(Dataset):
         return out
 
     def _get_volume(self, tomo_path: str) -> np.ndarray:
+        if self.cache_mode == "none":
+            return normalize_voxels(_load_volume(tomo_path), self.norm_cfg)
+
         if tomo_path not in self.volume_cache:
             self.volume_cache[tomo_path] = normalize_voxels(_load_volume(tomo_path), self.norm_cfg)
+            self.cache_order.append(tomo_path)
+            if self.max_cache_items > 0 and len(self.cache_order) > self.max_cache_items:
+                old = self.cache_order.pop(0)
+                self.volume_cache.pop(old, None)
         return self.volume_cache[tomo_path]
 
     def __len__(self) -> int:

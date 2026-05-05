@@ -11,11 +11,12 @@ import pandas as pd
 from core.config import load_yaml_config, require_nested_keys
 from core.errors import cli_entrypoint
 from core.runtime import ensure_output_dir, resolve_device
+from evaluation.submission_validator import validate_submission_df
 from inference.pipeline import (
     HeatmapPredictorFactory,
+    SUBMISSION_COLUMNS,
     load_inference_manifest,
     predict_submission_rows,
-    SUBMISSION_COLUMNS,
 )
 
 
@@ -40,10 +41,17 @@ def _validate_predict_config(cfg: dict[str, Any]) -> None:
             "data.patch_size",
             "data.normalization",
             "evaluation.tta_rotations",
+            "evaluation.tta_policy",
             "evaluation.ensemble_weights.unet3d",
             "evaluation.ensemble_weights.resnet2d",
             "evaluation.ensemble_weights.detr3d",
             "inference.no_motor_threshold",
+            "inference.low_memory_mode",
+            "inference.sliding_window_if_large",
+            "inference.window_overlap",
+            "inference.instance_threshold",
+            "inference.instance_min_size",
+            "inference.instance_nms_distance",
             "model",
         ],
     )
@@ -66,6 +74,8 @@ def main() -> None:
 
     checkpoint_path = _resolve_checkpoint(args, cfg)
     submission = run_inference(cfg, checkpoint_path)
+    expected_ids = load_inference_manifest(str(cfg["paths"]["test_csv"]))["tomo_id"].astype(str).tolist()
+    validate_submission_df(submission, expected_tomo_ids=expected_ids)
     out_path = Path(cfg["paths"]["submission_path"])
     ensure_output_dir(str(out_path.parent))
     submission.to_csv(out_path, index=False)
